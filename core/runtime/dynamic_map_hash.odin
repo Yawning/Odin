@@ -35,7 +35,7 @@ _WYHASH_DEFAULT_SECRET := Wyhash_Secret{
 	0x4d5a2da51de1aa47,
 }
 
-@(private)
+@(private,optimization_mode="speed")
 _wy_wide_mul :: #force_inline proc "contextless" (A, B: u64) -> (u64, u64) {
 	prod_wide := u128(A) * u128(B)
 	hi, lo := u64(prod_wide>>64), u64(prod_wide)
@@ -53,25 +53,25 @@ _wy_wide_mul :: #force_inline proc "contextless" (A, B: u64) -> (u64, u64) {
 	return A ~ lo, B ~ hi
 }
 
-@(private)
+@(private,optimization_mode="speed")
 _wy_mix :: #force_inline proc "contextless" (A, B: u64) ->u64 {
 	lo, hi := _wy_wide_mul(A, B)
 	return lo ~ hi
 }
 
-@(private)
+@(private,optimization_mode="speed")
 _wy_read_8 :: #force_inline proc "contextless" (p: [^]byte, off: int = 0) -> u64 {
 	pp := p[off:]
 	return u64(intrinsics.unaligned_load((^u64le)(pp)))
 }
 
-@(private)
+@(private,optimization_mode="speed")
 _wy_read_4 :: #force_inline proc "contextless" (p: [^]byte, off: int = 0) -> u64 {
 	pp := p[off:]
 	return u64(intrinsics.unaligned_load((^u32le)(pp)))
 }
 
-@(private)
+@(private,optimization_mode="speed")
 _wy_read_3 :: #force_inline proc "contextless" (p: [^]byte, k: int) -> u64 {
 	// Invariants: k < 4, k > 0.
 	//
@@ -81,8 +81,42 @@ _wy_read_3 :: #force_inline proc "contextless" (p: [^]byte, k: int) -> u64 {
 	return ((u64(p[0])) << 16) | ((u64(p[k >> 1])) << 8) | u64(p[k - 1])
 }
 
+@(private,optimization_mode="speed")
+_wyhash_bulk :: proc "contextless" (ptr: [^]byte, n: int, seed: u64, secret : ^Wyhash_Secret) -> (u64, u64, u64) {
+	p, seed_ := ptr, seed
+	a, b: u64
+
+	// This is the bulk (> 16 bytes) wyhash 4.2 path, separated out,
+	// so that it is possible to inline just the fast-path.
+	i := n
+	if intrinsics.expect(i >= 48, false) {
+		see1, see2 := seed_, seed_
+		for {
+			seed_ = _wy_mix(_wy_read_8(p) ~ secret[1], _wy_read_8(p, 8) ~ seed_)
+			see1 = _wy_mix(_wy_read_8(p, 16) ~ secret[2], _wy_read_8(p, 24) ~ see1)
+			see2 = _wy_mix(_wy_read_8(p, 32) ~ secret[3], _wy_read_8(p, 40) ~ see2)
+
+			p = p[48:]
+			i -= 48
+			if intrinsics.expect(i < 48, false) {
+				break
+			}
+		}
+		seed_ ~= see1 ~ see2
+	}
+	for intrinsics.expect(i > 16, false) {
+		seed_ = _wy_mix(_wy_read_8(p) ~ secret[1], _wy_read_8(p, 8) ~ seed_)
+		p = p[16:]
+		i -= 16
+	}
+	a = _wy_read_8(p, i - 16)
+	b = _wy_read_8(p, i - 8)
+
+	return seed_, a, b
+}
+
 @(optimization_mode="speed")
-_wyhash :: proc "contextless" (data: rawptr, n: int, seed: u64, secret: ^Wyhash_Secret) -> u64 {
+_wyhash :: #force_inline proc "contextless" (data: rawptr, n: int, seed: u64, secret: ^Wyhash_Secret) -> u64 {
 	p := ([^]byte)(data)
 	seed_ := seed ~ _wy_mix(seed ~ secret[0], secret[1])
 	a, b: u64
@@ -97,29 +131,8 @@ _wyhash :: proc "contextless" (data: rawptr, n: int, seed: u64, secret: ^Wyhash_
 		}
 		// Omit else for n == 0 a, b = 0, 0 (Zero initialized)
 	} else {
-		i := n
-		if intrinsics.expect(i >= 48, false) {
-			see1, see2 := seed_, seed_
-			for {
-				seed_ = _wy_mix(_wy_read_8(p) ~ secret[1], _wy_read_8(p, 8) ~ seed_)
-				see1 = _wy_mix(_wy_read_8(p, 16) ~ secret[2], _wy_read_8(p, 24) ~ see1)
-				see2 = _wy_mix(_wy_read_8(p, 32) ~ secret[3], _wy_read_8(p, 40) ~ see2)
-
-				p = p[48:]
-				i -= 48
-				if intrinsics.expect(i < 48, false) {
-					break
-				}
-			}
-			seed_ ~= see1 ~ see2
-		}
-		for intrinsics.expect(i > 16, false) {
-			seed_ = _wy_mix(_wy_read_8(p) ~ secret[1], _wy_read_8(p, 8) ~ seed_)
-			p = p[16:]
-			i -= 16
-		}
-		a = _wy_read_8(p, i - 16)
-		b = _wy_read_8(p, i - 8)
+		// The bulk path doesn't need to be inlined.
+		seed_, a, b = _wyhash_bulk(p, n, seed_, secret)
 	}
 
 	a ~= secret[1]
