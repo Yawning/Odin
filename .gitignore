@@ -22,6 +22,8 @@ bld/
 [Oo]bj/
 [Ll]og/
 ![Cc]ore/[Ll]og/
+tests/benchmark/bench_crypto
+tests/benchmark/bench_hash
 tests/documentation/verify/
 tests/documentation/all.odin-doc
 tests/internal/test_map
@@ -39,6 +41,7 @@ tests/core/test_core_libc
 tests/core/test_core_match
 tests/core/test_core_math
 tests/core/test_core_net
+tests/core/test_core_odin
 tests/core/test_core_os_exit
 tests/core/test_core_reflect
 tests/core/test_core_strings
