@@ -151,29 +151,25 @@ _mm_slli_si128_impl :: #force_inline proc "c" (a: __m128i, $IMM8: u32) -> __m128
 	// DEST := DEST << (TEMP * 8)
 	// DEST[MAXVL-1:128] (Unmodified)
 
-	when shift > 15 {
-		return __m128i(0)
-	}
-
 	return transmute(__m128i)simd.shuffle(
 		i8x16(0),
 		transmute(i8x16)a,
-		16 - shift + 0,
-		16 - shift + 1,
-		16 - shift + 2,
-		16 - shift + 3,
-		16 - shift + 4,
-		16 - shift + 5,
-		16 - shift + 6,
-		16 - shift + 7,
-		16 - shift + 8,
-		16 - shift + 9,
-		16 - shift + 10,
-		16 - shift + 11,
-		16 - shift + 12,
-		16 - shift + 13,
-		16 - shift + 14,
-		16 - shift + 15,
+		0 when shift > 15 else (16 - shift + 0),
+		1 when shift > 15 else (16 - shift + 1),
+		2 when shift > 15 else (16 - shift + 2),
+		3 when shift > 15 else (16 - shift + 3),
+		4 when shift > 15 else (16 - shift + 4),
+		5 when shift > 15 else (16 - shift + 5),
+		6 when shift > 15 else (16 - shift + 6),
+		7 when shift > 15 else (16 - shift + 7),
+		8 when shift > 15 else (16 - shift + 8),
+		9 when shift > 15 else (16 - shift + 9),
+		10 when shift > 15 else (16 - shift + 10),
+		11 when shift > 15 else (16 - shift + 11),
+		12 when shift > 15 else (16 - shift + 12),
+		13 when shift > 15 else (16 - shift + 13),
+		14 when shift > 15 else (16 - shift + 14),
+		15 when shift > 15 else (16 - shift + 15),
 	)
 }
 
