@@ -2,10 +2,11 @@ package bytes
 
 import "base:intrinsics"
 import "core:mem"
+import "core:simd"
 import "core:unicode"
 import "core:unicode/utf8"
 
-
+/*
 @private SIMD_SCAN_WIDTH :: 8 * size_of(uintptr)
 
 when SIMD_SCAN_WIDTH == 32 {
@@ -31,6 +32,7 @@ when SIMD_SCAN_WIDTH == 32 {
 } else {
 	#panic("Invalid SIMD_SCAN_WIDTH. Must be 32 or 64.")
 }
+*/
 
 
 clone :: proc(s: []byte, allocator := context.allocator, loc := #caller_location) -> []byte {
@@ -322,6 +324,25 @@ split_after_iterator :: proc(s: ^[]byte, sep: []byte) -> ([]byte, bool) {
 	return _split_iterator(s, sep, len(sep))
 }
 
+when ODIN_ARCH == .amd64 && intrinsics.has_target_feature("avx2") {
+	@(private)
+	SCANNER_INDICES_256 : simd.u8x32 : {
+		 0,  1,  2,  3,  4,  5,  6,  7,
+		 8,  9, 10, 11, 12, 13, 14, 15,
+		16, 17, 18, 19, 20, 21, 22, 23,
+		24, 25, 26, 27, 28, 29, 30, 31,
+	}
+	@(private)
+	SCANNER_SENTINEL_256: simd.u8x32 : u8(0xff)
+}
+@(private)
+SCANNER_INDICES_128 : simd.u8x16 : {
+	 0,  1,  2,  3,  4,  5,  6,  7,
+	 8,  9, 10, 11, 12, 13, 14, 15,
+}
+@(private)
+SCANNER_SENTINEL: simd.u8x16 : u8(0xff)
+
 /*
 Scan a slice of bytes for a specific byte.
 
@@ -335,12 +356,11 @@ Returns:
 - index: The index of the byte `c`, or -1 if it was not found.
 */
 index_byte :: proc(s: []byte, c: byte) -> (index: int) #no_bounds_check {
-	length := len(s)
-	i := 0
+	i, l := 0, len(s)
 
-	// Guard against small strings.
-	if length < SIMD_SCAN_WIDTH {
-		for /**/; i < length; i += 1 {
+	// Don't bother with SIMD if the slice is smaller than a SIMD register.
+	if l < 16 {
+		for /**/; i < l; i += 1 {
 			if s[i] == c {
 				return i
 			}
@@ -348,38 +368,143 @@ index_byte :: proc(s: []byte, c: byte) -> (index: int) #no_bounds_check {
 		return -1
 	}
 
-	ptr := int(uintptr(raw_data(s)))
+	scanner: simd.u8x16 = c
 
-	alignment_start := (SIMD_SCAN_WIDTH - ptr % SIMD_SCAN_WIDTH) % SIMD_SCAN_WIDTH
+	when ODIN_ARCH == .amd64 && intrinsics.has_target_feature("avx2") {
+		if l > 64 {
+			scanner_256 := simd.swizzle(
+				scanner,
+				0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+				0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+			)
 
-	// Iterate as a scalar until the data is aligned on a `SIMD_SCAN_WIDTH` boundary.
-	//
-	// This way, every load in the vector loop will be aligned, which should be
-	// the fastest possible scenario.
-	for /**/; i < alignment_start; i += 1 {
-		if s[i] == c {
-			return i
+			// Scan 128-byte chunks, using 256-bit SIMD.
+			for nr_blocks := l / 128; nr_blocks > 0; nr_blocks -= 1 {
+				s0 := intrinsics.unaligned_load(cast(^simd.u8x32)raw_data(s[i:]))
+				s1 := intrinsics.unaligned_load(cast(^simd.u8x32)raw_data(s[i+32:]))
+				s2 := intrinsics.unaligned_load(cast(^simd.u8x32)raw_data(s[i+64:]))
+				s3 := intrinsics.unaligned_load(cast(^simd.u8x32)raw_data(s[i+96:]))
+				c0 := simd.lanes_eq(s0, scanner_256)
+				c1 := simd.lanes_eq(s1, scanner_256)
+				c2 := simd.lanes_eq(s2, scanner_256)
+				c3 := simd.lanes_eq(s3, scanner_256)
+
+				m0 := simd.reduce_or(c0)
+				m1 := simd.reduce_or(c1)
+				m2 := simd.reduce_or(c2)
+				m3 := simd.reduce_or(c3)
+				if m0 | m1 | m2 | m3 > 0 {
+					if m0 > 0 {
+						sel := simd.select(c0, SCANNER_INDICES_256, SCANNER_SENTINEL_256)
+						off := simd.reduce_min(sel)
+						return i + int(off)
+					}
+					if m1 > 0 {
+						sel := simd.select(c1, SCANNER_INDICES_256, SCANNER_SENTINEL_256)
+						off := simd.reduce_min(sel)
+						return i + 32 + int(off)
+					}
+					if m2 > 0 {
+						sel := simd.select(c2, SCANNER_INDICES_256, SCANNER_SENTINEL_256)
+						off := simd.reduce_min(sel)
+						return i + 64 + int(off)
+					}
+					if m3 > 0 {
+						sel := simd.select(c3, SCANNER_INDICES_256, SCANNER_SENTINEL_256)
+						off := simd.reduce_min(sel)
+						return i + 96 + int(off)
+					}
+				}
+
+				i += 128
+			}
+
+			// Scan 64-byte chunks, using 256-bit SIMD.
+			for nr_blocks := (l - i) / 64; nr_blocks > 0; nr_blocks -= 1 {
+				s0 := intrinsics.unaligned_load(transmute(^simd.u8x32)raw_data(s[i:]))
+				s1 := intrinsics.unaligned_load(transmute(^simd.u8x32)raw_data(s[i+32:]))
+				c0 := simd.lanes_eq(s0, scanner_256)
+				c1 := simd.lanes_eq(s1, scanner_256)
+
+				m0 := simd.reduce_or(c0)
+				m1 := simd.reduce_or(c1)
+				if m0 | m1 > 0 {
+					if m0 > 0 {
+						sel := simd.select(c0, SCANNER_INDICES_256, SCANNER_SENTINEL_256)
+						off := simd.reduce_min(sel)
+						return i + int(off)
+					}
+					if m1 > 0 {
+						sel := simd.select(c1, SCANNER_INDICES_256, SCANNER_SENTINEL_256)
+						off := simd.reduce_min(sel)
+						return i + 32 + int(off)
+					}
+				}
+
+				i += 64
+			}
+		}
+	} else {
+		// Note: ARM can probaby do 128 or 256-bytes at a time.
+
+		// Scan 64-byte chunks, using 128-bit SIMD.
+		for nr_blocks := (l - i) / 64; nr_blocks > 0; nr_blocks -= 1 {
+			s0 := intrinsics.unaligned_load(cast(^simd.u8x16)raw_data(s[i:]))
+			s1 := intrinsics.unaligned_load(cast(^simd.u8x16)raw_data(s[i+16:]))
+			s2 := intrinsics.unaligned_load(cast(^simd.u8x16)raw_data(s[i+32:]))
+			s3 := intrinsics.unaligned_load(cast(^simd.u8x16)raw_data(s[i+48:]))
+			c0 := simd.lanes_eq(s0, scanner)
+			c1 := simd.lanes_eq(s1, scanner)
+			c2 := simd.lanes_eq(s2, scanner)
+			c3 := simd.lanes_eq(s3, scanner)
+
+			m0 := simd.reduce_or(c0)
+			m1 := simd.reduce_or(c1)
+			m2 := simd.reduce_or(c2)
+			m3 := simd.reduce_or(c3)
+			if m0 | m1 | m2 | m3 > 0 {
+				if m0 > 0 {
+					sel := simd.select(c0, SCANNER_INDICES_128, SCANNER_SENTINEL)
+					off := simd.reduce_min(sel)
+					return i + int(off)
+				}
+				if m1 > 0 {
+					sel := simd.select(c1, SCANNER_INDICES_128, SCANNER_SENTINEL)
+					off := simd.reduce_min(sel)
+					return i + 16 + int(off)
+				}
+				if m2 > 0 {
+					sel := simd.select(c2, SCANNER_INDICES_128, SCANNER_SENTINEL)
+					off := simd.reduce_min(sel)
+					return i + 32 + int(off)
+				}
+				if m3 > 0 {
+					sel := simd.select(c3, SCANNER_INDICES_128, SCANNER_SENTINEL)
+					off := simd.reduce_min(sel)
+					return i + 48 + int(off)
+				}
+			}
+
+			i += 64
 		}
 	}
 
-	// Iterate as a vector over every aligned chunk, evaluating each byte simultaneously at the CPU level.
-	scanner: #simd[SIMD_SCAN_WIDTH]u8 = c
-	tail := length - (length - alignment_start) % SIMD_SCAN_WIDTH
-
-	for /**/; i < tail; i += SIMD_SCAN_WIDTH {
-		load := (^#simd[SIMD_SCAN_WIDTH]u8)(&s[i])^
-		comparison := intrinsics.simd_lanes_eq(load, scanner)
-		match := intrinsics.simd_reduce_or(comparison)
-		if match > 0 {
-			sentinel: #simd[SIMD_SCAN_WIDTH]u8 = u8(0xFF)
-			index_select := intrinsics.simd_select(comparison, simd_scanner_indices, sentinel)
-			index_reduce := intrinsics.simd_reduce_min(index_select)
-			return i + int(index_reduce)
+	// Scan 16-byte chunks, using 128-bit SIMD.
+	for nr_blocks := (l - i) / 16; nr_blocks > 0; nr_blocks -= 1 {
+		s0 := intrinsics.unaligned_load(cast(^simd.u8x16)raw_data(s[i:]))
+		c0 := simd.lanes_eq(s0, scanner)
+		if simd.reduce_or(c0) > 0 {
+			sel := simd.select(c0, SCANNER_INDICES_128, SCANNER_SENTINEL)
+			off := simd.reduce_min(sel)
+			return i + int(off)
 		}
+
+		i += 16
 	}
 
-	// Iterate as a scalar over the remaining unaligned portion.
-	for /**/; i < length; i += 1 {
+	// Iterate as a scalar over the remaining non-SIMD register sized
+	// portion.
+	for /**/; i < l; i += 1 {
 		if s[i] == c {
 			return i
 		}
@@ -402,6 +527,15 @@ Returns:
 - index: The index of the byte `c`, or -1 if it was not found.
 */
 last_index_byte :: proc(s: []byte, c: byte) -> int #no_bounds_check {
+	i := len(s) - 1
+	for /**/; i >= 0; i -= 1 {
+		if s[i] == c {
+			return i
+		}
+	}
+
+	return -1
+/*
 	length := len(s)
 	i := length - 1
 
@@ -457,6 +591,7 @@ last_index_byte :: proc(s: []byte, c: byte) -> int #no_bounds_check {
 	}
 
 	return -1
+*/
 }
 
 

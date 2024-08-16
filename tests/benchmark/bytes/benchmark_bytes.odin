@@ -67,6 +67,7 @@ run_trial_size :: proc(p: proc([]u8, byte) -> int, size: int, idx: int, warmup: 
 
 HOT :: 3
 
+/*
 @test
 benchmark_plain_index_cold :: proc(t: ^testing.T) {
 	report: string
@@ -90,6 +91,7 @@ benchmark_plain_index_hot :: proc(t: ^testing.T) {
 	}
 	log.info(report)
 }
+*/
 
 @test
 benchmark_simd_index_cold :: proc(t: ^testing.T) {
@@ -97,8 +99,8 @@ benchmark_simd_index_cold :: proc(t: ^testing.T) {
 	for size in sizes {
 		timing := run_trial_size(bytes.index_byte, size, size - 1, 0, 1)
 		report = fmt.tprintf("%s\n        +++ % 8M | %v", report, size, timing)
-		timing = run_trial_size(bytes.last_index_byte, size, 0, 0, 1)
-		report = fmt.tprintf("%s\n (last) +++ % 8M | %v", report, size, timing)
+		// timing = run_trial_size(bytes.last_index_byte, size, 0, 0, 1)
+		// report = fmt.tprintf("%s\n (last) +++ % 8M | %v", report, size, timing)
 	}
 	log.info(report)
 }
@@ -109,8 +111,8 @@ benchmark_simd_index_hot :: proc(t: ^testing.T) {
 	for size in sizes {
 		timing := run_trial_size(bytes.index_byte, size, size - 1, HOT, HOT)
 		report = fmt.tprintf("%s\n        +++ % 8M | %v", report, size, timing)
-		timing = run_trial_size(bytes.last_index_byte, size, 0, HOT, HOT)
-		report = fmt.tprintf("%s\n (last) +++ % 8M | %v", report, size, timing)
+		// timing = run_trial_size(bytes.last_index_byte, size, 0, HOT, HOT)
+		// report = fmt.tprintf("%s\n (last) +++ % 8M | %v", report, size, timing)
 	}
 	log.info(report)
 }
